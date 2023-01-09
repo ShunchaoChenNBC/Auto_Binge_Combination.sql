@@ -73,22 +73,64 @@ from cte),
 rank_set as (select 
 Adobe_Date,
 Feeder_Video,
-Unique_Auto_Binge_Accounts+Unique_Click_Next_Accounts as Unqiue_Accounts,
-dense_rank() over (order by Unique_Auto_Binge_Accounts+Unique_Click_Next_Accounts desc) as Daily_rank
+Unique_Auto_Binge_Accounts,
+Unique_Click_Next_Accounts,
+Total_Unique_Accounts,
+dense_rank() over (order by Total_Unique_Accounts desc) as Daily_rank
 from
 (select 
 Adobe_Date,
 regexp_replace(lower(Feeder_Video), r"[:,.']", '') as Feeder_Video, -- remove punctunation from display name
 count(distinct case when Video_Start_Type = "Auto-Play" then Adobe_Tracking_ID else null end) as Unique_Auto_Binge_Accounts,
 count (distinct case when Video_Start_Type = "Clicked-Up-Next" then Adobe_Tracking_ID else null end) as Unique_Click_Next_Accounts,
+count (distinct case when Video_Start_Type in ("Clicked-Up-Next","Auto-Play") then Adobe_Tracking_ID else null end) as Total_Unique_Accounts,
 from click_Ready
-group by 1,2) a)
+where lower(Binge_Details) like "%series%cue%up%" and Feeder_Video is not null and Feeder_Video != "view-all" -- remove epsiode-to-epsiode cases and "View-All"
+group by 1,2) a),
+
+
+Mapping as (
+select Epsiodes, STRING_AGG(display_name order by display_name) as Series -- concat mutiple values to one
+from
+(select regexp_replace(lower(episode_title), r"[:,.']", '') as Epsiodes, display_name
+from `nbcu-ds-prod-001.PeacockDataMartSilver.SILVER_VIDEO`
+where 1=1
+and episode_title is not null 
+and lower(episode_title) not in ('yellowstone',
+                                'quantum leap',
+                                'dateline nbc',
+                                'pft live',
+                                'americas got talent all stars') -- extend the list to fix the wrong raw data
+and adobe_date = current_date("America/New_York")-1
+group by 1,2) b
+where display_name is not null and display_name != "N/a"
+group by 1
+)
 
 select 
 Adobe_Date,
 Daily_rank,
 Feeder_Video,
-Unqiue_Accounts
+Series,
+Unique_Auto_Binge_Accounts,
+Unique_Click_Next_Accounts,
+Total_Unique_Accounts
+from
+(select 
+Adobe_Date,
+Daily_rank,
+Feeder_Video,
+Unique_Auto_Binge_Accounts,
+Unique_Click_Next_Accounts,
+Total_Unique_Accounts
 from rank_set
-where Daily_rank <= 50
+where Daily_rank <= 50) c
+left join Mapping d on trim(c.Feeder_Video) = trim(d.Epsiodes)
+order by 1,7 desc
+
+
+
+
+
+
 
