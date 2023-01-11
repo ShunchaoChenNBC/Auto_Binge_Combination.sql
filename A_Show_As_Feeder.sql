@@ -155,3 +155,42 @@ order by 1,2,3)
 select *
 from cte3
 order by 1,2,3
+
+
+################ QUery the result based on the table above ########################
+
+with cte2 as (
+select Adobe_Date,
+round(sum(New_Watch_Time)/3600,2) as Total_Watch_Time
+from `nbcu-ds-sandbox-a-001.Shunchao_Sandbox_Final.A_Friend_of Family_From`
+group by 1
+),
+
+cte3 as (
+select 
+Adobe_Date,
+Feeder_Video,
+Display_Name,
+count(distinct Adobe_Tracking_ID) as Unique_Accounts,
+round(sum(New_Watch_Time)/3600,2) as New_Watch_Times,
+from `nbcu-ds-sandbox-a-001.Shunchao_Sandbox_Final.A_Friend_of Family_From`
+where lower(Display_Name) in ('the thing about pam','halloween ends','a friend of the family: true evil') and Video_Start_Type = "Auto-Play" 
+group by 1,2,3)
+
+
+select 
+a.*,
+cte2.Total_Watch_Time,
+a.New_Watch_Times / cte2.Total_Watch_Time as Prc_of_Total
+from(
+select 
+cte3.Adobe_Date,
+-- case when New_Watch_Times / Total_Watch_Time > 0.005 then cte3.Feeder_Video else "Unattributed" end as Feeder_Video,(depends on if you need to unattribute the unimportant feeder videos)
+lower(cte3.Feeder_Video) as Feeder_Video,
+lower(cte3.Display_Name) as Display_Name,
+sum(cte3.Unique_Accounts) as Unique_Accounts,
+sum(cte3.New_Watch_Times) as New_Watch_Times
+from cte3
+group by 1,2,3) as a
+left join cte2 on cte2.Adobe_Date = a.Adobe_Date
+order by 1,4 desc
