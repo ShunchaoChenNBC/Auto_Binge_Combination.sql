@@ -1,0 +1,171 @@
+with Raw_Clicks as (SELECT
+post_evar56 as Adobe_Tracking_ID, 
+DATE(timestamp(post_cust_hit_time_gmt), "America/New_York") AS Adobe_Date,
+DATETIME(timestamp(post_cust_hit_time_gmt), "America/New_York") AS Adobe_Timestamp,
+post_evar19 as Player_Event,
+post_evar7 as Binge_Details,
+CASE WHEN LOWER(post_evar37) = 'xfinity' AND RIGHT(post_evar53,5) = ':1001' THEN CONCAT(post_evar37, ' Flex')
+	WHEN LOWER(post_evar37) = 'xfinity' AND (RIGHT(post_evar53,5) != ':1001' OR post_evar53 is null) THEN CONCAT(post_evar37, ' X1')
+	WHEN LOWER(post_evar106) ='chromecast' AND lower(post_evar37) = 'android tv' THEN 'Google TV'
+	when lower(post_evar106)= 'chromecast' AND lower(post_evar37) = 'Chromecast Receiver App' then 'Chromecast Receiver App'
+	when LOWER(post_evar37) like '%xbox%' then 'xbox'
+	when LOWER(post_evar37) ='ps4' then 'playstation'
+	ELSE post_evar37 end as device_name -- add device name
+FROM `nbcu-ds-prod-001.feed.adobe_clickstream` 
+WHERE post_evar56 is not null
+and post_cust_hit_time_gmt is not null 
+and post_evar7 is not null
+and post_evar7 not like "%display"
+and DATE(timestamp(post_cust_hit_time_gmt), "America/New_York") between '2023-01-06' and '2023-01-14'),
+
+cte as (select 
+Adobe_Tracking_ID,
+Adobe_Date,
+Adobe_Timestamp,
+Player_Event,
+Binge_Details,
+Video_Start_Type,
+device_name,
+Feeder_Video,
+Feeder_Video_Id,
+Display_Name,
+video_id,
+num_seconds_played_no_ads
+from
+(SELECT 
+Adobe_Tracking_ID,
+Adobe_Date,
+Adobe_Timestamp,
+Player_Event,
+Binge_Details,
+case when Binge_Details like "%auto-play" then "Auto-Play" 
+     when Binge_Details like '%cue%up%click' then "Clicked-Up-Next" 
+     when Binge_Details like "%dismiss" then "Dismiss" 
+     when Player_Event like "%details:%" and Binge_Details is not null then "Manual-Selection"
+     when Binge_Details like '%deeplink%' then "Manual-Selection"
+     when Binge_Details like 'rail%click'then "Manual-Selection" 
+else null end as Video_Start_Type,
+device_name,
+"" Feeder_Video,
+"" Feeder_Video_Id,
+case when Player_Event like "%:episodes:%" and Binge_Details is not null then REGEXP_REPLACE(Player_Event, r'peacock:details:episodes:', '')
+     when Player_Event like "%:upsell:%" and Binge_Details is not null then REGEXP_REPLACE(Player_Event, r'peacock:details:upsell:', '')
+     when Player_Event like "%:more-like-this:%" and Binge_Details is not null then REGEXP_REPLACE(Player_Event, r'peacock:details:more-like-this:', '')
+     when Player_Event like "%:extras:%" and Binge_Details is not null then REGEXP_REPLACE(Player_Event, r'peacock:details:extras:', '')
+     when Player_Event like "%:details:%" and Binge_Details is not null then REGEXP_REPLACE(Player_Event, r'peacock:details:', '')
+     when Binge_Details like "%auto-play" then  REGEXP_EXTRACT(Binge_Details, r"[|][|](.*)[|]")
+     when Binge_Details like '%cue%up%click' then  REGEXP_EXTRACT(Binge_Details, r"[|][|](.*)[|]")
+     when Binge_Details like 'rail%click'then REGEXP_EXTRACT(Binge_Details, r"[|]([a-zA-Z0-9\s-.:]+)[|]click")
+else null end as Display_Name,
+"" video_id,
+null num_seconds_played_no_ads
+FROM Raw_Clicks)
+where Video_Start_Type is not null and lower(device_name) like "%fire%tv%" ), -- Only keep fire tv
+
+click_Ready as (select 
+Adobe_Tracking_ID,
+Adobe_Date,
+Adobe_Timestamp,
+Player_Event,
+Binge_Details,
+Video_Start_Type,
+device_name,
+Lag(Display_Name) over (partition by adobe_tracking_id, adobe_date order by adobe_timestamp) as Feeder_Video,
+Feeder_Video_Id,
+Display_Name,
+video_id,
+num_seconds_played_no_ads
+from cte),
+
+---------------------------------Map Here so we can do the aggregation after mapping
+---------------------------------Below: build up the mapping table for series
+cte2 as (
+select regexp_replace(lower(episode_title), r"[:,.&'!]", '') as Epsiodes, 
+case when length(display_name) <= 4 
+          or lower(display_name) like "%tv" 
+          or lower(display_name) like "%)" 
+          or lower(display_name) like "%-dt"
+          or lower(display_name) like "%premium"
+          or lower(display_name) in ('ktvh-dt','ksnv-dt','Kgwn.2') -- add extreme cases here
+          or regexp_contains(display_name, r"(W)[a-zA-Z0-9]+-[a-zA-Z0-9]")
+          or regexp_contains(display_name, r"(K)[a-zA-Z0-9]+-[a-zA-Z0-9]")
+          then null 
+          else regexp_replace(lower(display_name), r"[:,.&'!]", '') --clean series here
+          end as Series,-- remove platform names
+count (display_name) as Display_Time
+from `nbcu-ds-prod-001.PeacockDataMartSilver.SILVER_VIDEO`
+where 1=1
+and episode_title is not null 
+and lower(episode_title) not in ('yellowstone',
+                                'quantum leap',
+                                'dateline nbc',
+                                'pft live',
+                                'americas got talent all stars') -- extend the list to fix the wrong raw data
+and adobe_date = current_date("America/New_York")-1
+group by 1,2
+),
+
+Mapping_Middle as (
+select Epsiodes, 
+Series,
+dense_rank() over (partition by Epsiodes order by Display_Time desc) as rk
+from cte2
+where Series is not null and Series != "N/a" and Epsiodes is not null and Epsiodes != "n/a"
+order by 3 desc),
+
+Mapping as (
+select Epsiodes, 
+Series
+from Mapping_Middle
+where rk = 1 --- Only keep the highest value
+)
+------------------------------ Above is the block for Mapping Table 
+
+
+select cr.*,
+case when m.Series is not null then m.Series else regexp_replace(lower(cr.Feeder_Video), r"[:,.&'!]", '') end as Combination
+from click_Ready cr
+left join Mapping m on m.Epsiodes = regexp_replace(lower(cr.Feeder_Video), r"[:,.&'!]", '')
+where lower(Binge_Details) like "%series%cue%up%" -- filter out series_to_series
+order by 1,2,3
+
+
+-- select 
+-- Adobe_Date,
+-- Combination as Auto_Binge_Source_Titles,
+-- Display_Name,
+-- Unique_Auto_Binge_Accounts,
+-- Unique_Click_Next_Accounts,
+-- Total_Unique_Accounts
+-- from
+-- (select 
+-- Adobe_Date,
+-- Combination,
+-- Display_Name,
+-- count(distinct case when Video_Start_Type = "Auto-Play" then Adobe_Tracking_ID else null end) as Unique_Auto_Binge_Accounts,
+-- count(distinct case when Video_Start_Type = "Clicked-Up-Next" then Adobe_Tracking_ID else null end) as Unique_Click_Next_Accounts,
+-- count(distinct case when Video_Start_Type in ("Clicked-Up-Next","Auto-Play") then Adobe_Tracking_ID else null end) as Total_Unique_Accounts,
+-- from Combinations 
+-- where Combination is not null 
+-- and Combination != "view-all" -- remove "View-All"
+-- and Combination not in (SELECT 
+--                          regexp_replace(lower(content_channel), r"[:,.&'!]", '')
+--                          FROM `nbcu-ds-prod-001.PeacockDataMartSilver.SILVER_VIDEO` 
+--                          WHERE 1=1
+--                          and adobe_date = '2023-01-10'
+--                          and content_channel != "N/A"
+--                          group by 1)  -- remove linear channels from the result
+-- group by 1,2,3) 
+-- where Combination = "below deck"
+
+
+-- select 
+-- Adobe_Date,
+-- Daily_Ranks,
+-- Auto_Binge_Source_Titles,
+-- Unique_Auto_Binge_Accounts,
+-- Unique_Click_Next_Accounts,
+-- Total_Unique_Accounts
+-- from rank_set
+-- where Daily_Ranks <= 50
+-- order by 1,6 desc
