@@ -70,29 +70,22 @@ video_id,
 num_seconds_played_no_ads
 from cte),
 
-rank_set as (select 
-Adobe_Date,
-Feeder_Video,
-Unique_Auto_Binge_Accounts,
-Unique_Click_Next_Accounts,
-Total_Unique_Accounts,
-dense_rank() over (order by Total_Unique_Accounts desc) as Daily_rank
-from
-(select 
-Adobe_Date,
-regexp_replace(lower(Feeder_Video), r"[:,.']", '') as Feeder_Video, -- remove punctunation from display name
-count(distinct case when Video_Start_Type = "Auto-Play" then Adobe_Tracking_ID else null end) as Unique_Auto_Binge_Accounts,
-count (distinct case when Video_Start_Type = "Clicked-Up-Next" then Adobe_Tracking_ID else null end) as Unique_Click_Next_Accounts,
-count (distinct case when Video_Start_Type in ("Clicked-Up-Next","Auto-Play") then Adobe_Tracking_ID else null end) as Total_Unique_Accounts,
-from click_Ready
-where lower(Binge_Details) like "%series%cue%up%" and Feeder_Video is not null and Feeder_Video != "view-all" -- remove epsiode-to-epsiode cases and "View-All"
-group by 1,2) a),
+---------------------------------Map Here so we can do the aggregation after mapping
 
-
-Mapping as (
-select Epsiodes, STRING_AGG(display_name order by display_name) as Series -- concat mutiple values to one
-from
-(select regexp_replace(lower(episode_title), r"[:,.']", '') as Epsiodes, display_name
+cte2 as (
+select regexp_replace(lower(episode_title), r"[:,.&'!]", '') as Epsiodes, 
+case when length(display_name) <= 4 
+          or lower(display_name) like "%tv" 
+          or lower(display_name) like "%)" 
+          or lower(display_name) like "%-dt"
+          or lower(display_name) like "%premium"
+          or lower(display_name) in ('ktvh-dt','ksnv-dt','Kgwn.2') -- add extreme cases here
+          or regexp_contains(display_name, r"(W)[a-zA-Z0-9]+-[a-zA-Z0-9]")
+          or regexp_contains(display_name, r"(K)[a-zA-Z0-9]+-[a-zA-Z0-9]")
+          then null 
+          else regexp_replace(lower(display_name), r"[:,.&'!]", '') --clean series here
+          end as Series,-- remove platform names
+count (display_name) as Display_Time
 from `nbcu-ds-prod-001.PeacockDataMartSilver.SILVER_VIDEO`
 where 1=1
 and episode_title is not null 
@@ -102,35 +95,67 @@ and lower(episode_title) not in ('yellowstone',
                                 'pft live',
                                 'americas got talent all stars') -- extend the list to fix the wrong raw data
 and adobe_date = current_date("America/New_York")-1
-group by 1,2) b
-where display_name is not null and display_name != "N/a"
-group by 1
-)
+group by 1,2
+),
 
-select 
-Adobe_Date,
-Daily_rank,
-Feeder_Video,
+Mapping_Middle as (
+select Epsiodes, 
 Series,
+dense_rank() over (partition by Epsiodes order by Display_Time desc) as rk
+from cte2
+where Series is not null and Series != "N/a" and Epsiodes is not null and Epsiodes != "n/a"
+order by 3 desc),
+
+Mapping as (
+select Epsiodes, 
+Series
+from Mapping_Middle
+where rk = 1 --- Only keep the highest value
+),
+------------------------------ Above is the block for Mapping Table 
+
+Combinations as (
+select cr.*,
+case when m.Series is not null then m.Series else regexp_replace(lower(cr.Feeder_Video), r"[:,.&'!]", '') end as Combination
+from click_Ready cr
+left join Mapping m on m.Epsiodes = regexp_replace(lower(cr.Feeder_Video), r"[:,.&'!]", '')
+),
+
+
+rank_set as (select 
+Adobe_Date,
+Combination as Auto_Binge_Source_Titles,
 Unique_Auto_Binge_Accounts,
 Unique_Click_Next_Accounts,
-Total_Unique_Accounts
+Total_Unique_Accounts,
+dense_rank() over (partition by Adobe_Date order by Total_Unique_Accounts desc) as Daily_Ranks
 from
 (select 
 Adobe_Date,
-Daily_rank,
-Feeder_Video,
+Combination,
+count(distinct case when Video_Start_Type = "Auto-Play" then Adobe_Tracking_ID else null end) as Unique_Auto_Binge_Accounts,
+count(distinct case when Video_Start_Type = "Clicked-Up-Next" then Adobe_Tracking_ID else null end) as Unique_Click_Next_Accounts,
+count(distinct case when Video_Start_Type in ("Clicked-Up-Next","Auto-Play") then Adobe_Tracking_ID else null end) as Total_Unique_Accounts,
+from Combinations 
+where lower(Binge_Details) like "%series%cue%up%" 
+and Combination is not null 
+and Combination != "view-all" -- remove epsiode-to-epsiode cases and "View-All"
+and Combination not in (SELECT 
+                         regexp_replace(lower(content_channel), r"[:,.&'!]", '')
+                         FROM `nbcu-ds-prod-001.PeacockDataMartSilver.SILVER_VIDEO` 
+                         WHERE 1=1
+                         and adobe_date = current_date("America/New_York")-1
+                         and content_channel != "N/A"
+                         group by 1)  -- remove linear channels from the result
+group by 1,2) a)
+
+select 
+Adobe_Date,
+Daily_Ranks,
+Auto_Binge_Source_Titles,
 Unique_Auto_Binge_Accounts,
 Unique_Click_Next_Accounts,
 Total_Unique_Accounts
 from rank_set
-where Daily_rank <= 50) c
-left join Mapping d on trim(c.Feeder_Video) = trim(d.Epsiodes)
-order by 1,7 desc
-
-
-
-
-
-
-
+where Daily_Ranks <= 50
+order by 1,6 desc
