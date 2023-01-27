@@ -118,7 +118,7 @@ Combinations as (
 select cr.*,
 case when m.Series is not null then m.Series else regexp_replace(lower(cr.Feeder_Video), r"[:,.&'!]", '') end as Combination
 from click_Ready cr
-left join Mapping m on m.Epsiodes = regexp_replace(lower(cr.Feeder_Video), r"[:,.&'!]", '')
+left join Mapping m on regexp_replace(lower(m.Epsiodes), r"[:,.&'!]", '') = regexp_replace(lower(cr.Feeder_Video), r"[:,.&'!]", '')
 ),
 
 
